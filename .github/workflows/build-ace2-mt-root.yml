@@ -98,23 +98,25 @@ jobs:
           cd kernel_workspace
           LTO=thin SYSTEM_DLKM_RE_SIGN=0 BUILD_SYSTEM_DLKM=0 KMI_SYMBOL_LIST_STRICT_MODE=0 \
             ./kernel_platform/oplus/build/oplus_build_kernel.sh waipio gki
-          ./kernel_platform/oplus/build/oplus_rebuild_img.sh waipio gki
 
       - name: Collect Artifacts
         run: |
           set -e
           mkdir -p artifacts
           cd kernel_workspace/kernel_platform
-          echo "==== 关键产物 ===="
-          find out -type f \( -name 'boot.img' -o -name 'vendor_dlkm.img' \
-            -o -name 'dtbo.img' -o -name 'Image' -o -name 'Image.gz' \
-            -o -name 'kernel.release' \) -print
-          mapfile -t DISTS < <(find out -type d -name dist)
-          if [ "${#DISTS[@]}" -gt 0 ]; then
-            tar -czf "$GITHUB_WORKSPACE/artifacts/ace2-mt-root-dist.tar.gz" "${DISTS[@]}"
-          fi
-          find out -name kernel.release -exec sh -c 'echo "$1:"; cat "$1"' _ {} \; || true
+          DIST=""
+          for d in out/msm-waipio-waipio-gki/dist out/*/dist; do
+            [ -d "$d" ] && DIST="$d" && break
+          done
+          [ -n "$DIST" ] || { echo "找不到 dist 目录"; find out -maxdepth 3 -type d | head -40; exit 1; }
+          echo "DIST=$DIST"
+          ls -lh "$DIST"
+          for f in boot.img vendor_boot.img vendor_dlkm.img dtbo.img Image Image.lz4; do
+            [ -f "$DIST/$f" ] && cp "$DIST/$f" "$GITHUB_WORKSPACE/artifacts/"
+          done
           find out -name kernel.release -exec cp {} "$GITHUB_WORKSPACE/artifacts/kernel.release" \; || true
+          [ -f "$DIST/.config" ] && cp "$DIST/.config" "$GITHUB_WORKSPACE/artifacts/kernel.config" || true
+          cat "$GITHUB_WORKSPACE/artifacts/kernel.release" 2>/dev/null || true
           ls -lh "$GITHUB_WORKSPACE/artifacts"
 
       - name: Upload Images
