@@ -1,0 +1,101 @@
+name: Build Ace2 MT Root Kernel
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 360
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Save Patch Outside Workspace
+        run: cp patches/0001-mt-root.patch /tmp/0001-mt-root.patch
+
+      - name: Maximize Build Space
+        env:
+          ROOT_RESERVE_MB: '8192'
+          TEMP_RESERVE_MB: '2048'
+          REMOVE_DOTNET: 'true'
+          REMOVE_ANDROID: 'true'
+          REMOVE_HASKELL: 'true'
+          REMOVE_CODEQL: 'true'
+        run: bash scripts/maximize-build-space.sh
+
+      - name: Install Dependencies
+        run: |
+          set -e
+          sudo apt-get update
+          sudo apt-get install -y python3 git curl bc libelf-dev build-essential \
+            flex bison libssl-dev libncurses-dev lz4 zlib1g-dev libxml2-utils \
+            rsync unzip gawk dos2unix kmod libdw-dev elfutils dwarves ccache patch
+          curl -fsSL https://storage.googleapis.com/git-repo-downloads/repo -o /tmp/repo
+          sudo install -m 0755 /tmp/repo /usr/local/bin/repo
+          git config --global user.name "ace2-builder"
+          git config --global user.email "ace2-builder@local"
+          git config --global color.ui false
+
+      - name: Initialize Repo and Sync
+        env:
+          GIT_TERMINAL_PROMPT: '0'
+        run: |
+          set -e
+          mkdir -p kernel_workspace
+          cd kernel_workspace
+          repo init -u https://github.com/OnePlusOSS/kernel_manifest.git \
+            -b refs/heads/oneplus/sm8475 -m oneplus_ace2_b.xml \
+            --depth=1 --no-clone-bundle --no-tags
+          repo sync -c -j"$(nproc)" --no-clone-bundle --no-tags --force-sync
+          df -h
+
+      - name: Apply MT Root Patch
+        run: |
+          set -e
+          cd kernel_workspace
+          for d in kernel_platform/msm-kernel kernel_platform/common; do
+            if [ -f "$d/kernel/cred.c" ] && [ -f "$d/fs/exec.c" ]; then
+              echo "==== patching $d ===="
+              if (cd "$d" && git apply --check /tmp/0001-mt-root.patch); then
+                (cd "$d" && git apply /tmp/0001-mt-root.patch)
+              else
+                echo "git apply 上下文不匹配，改用 patch -F3"
+                (cd "$d" && patch -p1 --forward --fuzz=3 < /tmp/0001-mt-root.patch)
+              fi
+              grep -n '10345' "$d/kernel/cred.c" "$d/fs/exec.c"
+              grep -n 'enforcing_set(&selinux_state, 0)' "$d/security/selinux/hooks.c"
+            fi
+          done
+
+      - name: Build Kernel and Images
+        run: |
+          set -e
+          cd kernel_workspace
+          LTO=thin SYSTEM_DLKM_RE_SIGN=0 BUILD_SYSTEM_DLKM=0 KMI_SYMBOL_LIST_STRICT_MODE=0 \
+            ./kernel_platform/oplus/build/oplus_build_kernel.sh waipio gki
+          ./kernel_platform/oplus/build/oplus_rebuild_img.sh waipio gki
+
+      - name: Collect Artifacts
+        run: |
+          set -e
+          mkdir -p artifacts
+          cd kernel_workspace/kernel_platform
+          echo "==== 关键产物 ===="
+          find out -type f \( -name 'boot.img' -o -name 'vendor_dlkm.img' \
+            -o -name 'dtbo.img' -o -name 'Image' -o -name 'Image.gz' \
+            -o -name 'kernel.release' \) -print
+          mapfile -t DISTS < <(find out -type d -name dist)
+          if [ "${#DISTS[@]}" -gt 0 ]; then
+            tar -czf "$GITHUB_WORKSPACE/artifacts/ace2-mt-root-dist.tar.gz" "${DISTS[@]}"
+          fi
+          find out -name kernel.release -exec sh -c 'echo "$1:"; cat "$1"' _ {} \; || true
+          find out -name kernel.release -exec cp {} "$GITHUB_WORKSPACE/artifacts/kernel.release" \; || true
+          ls -lh "$GITHUB_WORKSPACE/artifacts"
+
+      - name: Upload Images
+        uses: actions/upload-artifact@v4
+        with:
+          name: ace2-mt-root-${{ github.run_number }}
+          path: artifacts/
+          retention-days: 7
