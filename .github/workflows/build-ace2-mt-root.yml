@@ -89,8 +89,16 @@ jobs:
               fi
               grep -n '10345' "$d/kernel/cred.c" "$d/fs/exec.c"
               grep -n 'enforcing_set(&selinux_state, 0)' "$d/security/selinux/hooks.c"
+              grep -n 'enforcing_enabled(state)' "$d/security/selinux/avc.c"
             fi
           done
+
+      - name: Align Kernel Release String
+        run: |
+          set -e
+          python3 scripts/align-kernel-release.py \
+            kernel_workspace/kernel_platform/common/scripts/setlocalversion \
+            kernel_workspace/kernel_platform/msm-kernel/scripts/setlocalversion
 
       - name: Build Kernel and Images
         run: |
