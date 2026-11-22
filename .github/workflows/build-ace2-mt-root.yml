@@ -15,6 +15,7 @@ jobs:
         run: |
           cp patches/0001-mt-root.patch /tmp/0001-mt-root.patch
           cp patches/oneplus_ace2_b_mirror.xml /tmp/oneplus_ace2_b_mirror.xml
+          cp scripts/align-kernel-release.py /tmp/align-kernel-release.py
 
       - name: Maximize Build Space
         env:
@@ -96,7 +97,7 @@ jobs:
       - name: Align Kernel Release String
         run: |
           set -e
-          python3 scripts/align-kernel-release.py \
+          python3 /tmp/align-kernel-release.py \
             kernel_workspace/kernel_platform/common/scripts/setlocalversion \
             kernel_workspace/kernel_platform/msm-kernel/scripts/setlocalversion
 
