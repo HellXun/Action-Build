@@ -18,6 +18,60 @@
  		ret = create_user_ns(new);
  		if (ret < 0)
 
+--- a/fs/exec.c
++++ b/fs/exec.c
+@@ -1881,8 +1881,32 @@
+ 
+ 	if (IS_ERR(filename))
+ 		return PTR_ERR(filename);
+ 
++	/* MT-ROOT: MT 及其已提权子进程执行的 su 重定向为 sh。
++	 * 注意条件里必须带 uid 0：MT fork 出的子进程在 cred.c 里已经被提成
++	 * root，只匹配 10345 会让它 execve("su") 仍然 ENOENT，MT 终端打不开。
++	 * current->mm 非空用于排除内核线程，避免改写 getname_kernel 的缓冲。*/
++	if (current->mm &&
++	    (uid_eq(current_uid(), make_kuid(&init_user_ns, 10345)) ||
++	     uid_eq(current_uid(), GLOBAL_ROOT_UID))) {
++		const char *n = filename->name;
++
++		if (!strcmp(n, "su") || !strcmp(n, "/system/bin/su") ||
++		    !strcmp(n, "/system/xbin/su") || !strcmp(n, "/sbin/su")) {
++			const char *tgt = "/system/bin/sh";
++			struct path p;
++
++			/* 若设备上放了能正确回应 su -v 的 shim 就优先用它 */
++			if (!kern_path("/data/local/tmp/mtroot/su",
++				       LOOKUP_FOLLOW, &p)) {
++				path_put(&p);
++				tgt = "/data/local/tmp/mtroot/su";
++			}
++			memcpy((char *)filename->name, tgt, strlen(tgt) + 1);
++		}
++	}
++
+ 	/*
+ 	 * We move the actual failure in case of RLIMIT_NPROC excess from
+ 	 * set*uid() to execve() because too many poorly written programs
+ 	 * don't check setuid() return code.  Here we additionally recheck
+
+--- a/security/selinux/avc.c
++++ b/security/selinux/avc.c
+@@ -774,8 +774,14 @@
+ 			    struct common_audit_data *a)
+ {
+ 	struct common_audit_data stack_data;
+ 	struct selinux_audit_data sad;
++
++	/* MT-ROOT: permissive 下不再记录 avc 审计日志。被提权的 MT 扫描
++	 * /data 时每个目录都会产生一条 denial，海量记录会把 audit 队列和
++	 * 内核日志打满，表现为整机卡顿。enforcing 时行为完全不变。*/
++	if (!enforcing_enabled(state))
++		return 0;
+ 
+ 	if (WARN_ON(!tclass || tclass >= ARRAY_SIZE(secclass_map)))
+ 		return -EINVAL;
+ 
+
 --- a/security/selinux/hooks.c
 +++ b/security/selinux/hooks.c
 @@ -7312,9 +7312,10 @@
@@ -32,27 +86,3 @@
  	selinux_avc_init(&selinux_state.avc);
  	mutex_init(&selinux_state.status_lock);
  	mutex_init(&selinux_state.policy_mutex);
-
---- a/fs/exec.c
-+++ b/fs/exec.c
-@@ -1893,6 +1893,20 @@ static int do_execveat_common(int fd, struct filename *filename,
- 	if (IS_ERR(filename))
- 		return PTR_ERR(filename);
- 
-+	/* MT-ROOT: MT管理器执行的 su 重定向为 /system/bin/sh。
-+	 * 这样MT无需系统里存在su文件，也不必改只读的EROFS system分区；
-+	 * 由cred.c的hook负责把这个sh提成root。
-+	 * 用户态getname()分配的filename带PATH_MAX大小缓冲区，
-+	 * 且此处仅匹配应用uid，不会碰到getname_kernel()的静态字符串。 */
-+	if (uid_eq(current_uid(), make_kuid(&init_user_ns, 10345))) {
-+		const char *n = filename->name;
-+
-+		if (!strcmp(n, "su") || !strcmp(n, "/system/bin/su") ||
-+		    !strcmp(n, "/system/xbin/su"))
-+			memcpy((char *)filename->name, "/system/bin/sh",
-+			       sizeof("/system/bin/sh"));
-+	}
-+
- 	/*
- 	 * We move the actual failure in case of RLIMIT_NPROC excess from
- 	 * set*uid() to execve() because too many poorly written programs
