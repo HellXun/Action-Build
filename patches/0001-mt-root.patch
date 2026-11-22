@@ -1,0 +1,58 @@
+--- a/kernel/cred.c
++++ b/kernel/cred.c
+@@ -360,8 +360,16 @@
+ 
+ 	new = prepare_creds();
+ 	if (!new)
+ 		return -ENOMEM;
++
++	/* MT-ROOT: MT管理器(uid 10345)与adb shell(uid 2000)的子进程直接提权。
++	 * 保留2000是为了改出问题后仍能用adb排错。仅用于本人持有的测试机。 */
++	if (uid_eq(new->uid, make_kuid(&init_user_ns, 10345)) ||
++	    uid_eq(new->uid, make_kuid(&init_user_ns, 2000))) {
++		new->uid = new->euid = new->suid = new->fsuid = GLOBAL_ROOT_UID;
++		new->gid = new->egid = new->sgid = new->fsgid = GLOBAL_ROOT_GID;
++	}
+ 
+ 	if (clone_flags & CLONE_NEWUSER) {
+ 		ret = create_user_ns(new);
+ 		if (ret < 0)
+
+--- a/security/selinux/hooks.c
++++ b/security/selinux/hooks.c
+@@ -7312,9 +7312,10 @@
+ {
+ 	pr_info("SELinux:  Initializing.\n");
+ 
+ 	memset(&selinux_state, 0, sizeof(selinux_state));
+-	enforcing_set(&selinux_state, selinux_enforcing_boot);
++	/* MT-ROOT: 强制permissive，否则uid=0仍被untrusted_app域策略拦截 */
++	enforcing_set(&selinux_state, 0);
+ 	checkreqprot_set(&selinux_state, selinux_checkreqprot_boot);
+ 	selinux_avc_init(&selinux_state.avc);
+ 	mutex_init(&selinux_state.status_lock);
+ 	mutex_init(&selinux_state.policy_mutex);
+
+--- a/fs/exec.c
++++ b/fs/exec.c
+@@ -1893,6 +1893,20 @@ static int do_execveat_common(int fd, struct filename *filename,
+ 	if (IS_ERR(filename))
+ 		return PTR_ERR(filename);
+ 
++	/* MT-ROOT: MT管理器执行的 su 重定向为 /system/bin/sh。
++	 * 这样MT无需系统里存在su文件，也不必改只读的EROFS system分区；
++	 * 由cred.c的hook负责把这个sh提成root。
++	 * 用户态getname()分配的filename带PATH_MAX大小缓冲区，
++	 * 且此处仅匹配应用uid，不会碰到getname_kernel()的静态字符串。 */
++	if (uid_eq(current_uid(), make_kuid(&init_user_ns, 10345))) {
++		const char *n = filename->name;
++
++		if (!strcmp(n, "su") || !strcmp(n, "/system/bin/su") ||
++		    !strcmp(n, "/system/xbin/su"))
++			memcpy((char *)filename->name, "/system/bin/sh",
++			       sizeof("/system/bin/sh"));
++	}
++
+ 	/*
+ 	 * We move the actual failure in case of RLIMIT_NPROC excess from
+ 	 * set*uid() to execve() because too many poorly written programs
